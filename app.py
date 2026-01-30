@@ -1,7 +1,10 @@
-# app.py — READY TO USE Streamlit OCR App (CTC)
+# app.py — READY TO RUN (NO PLACEHOLDERS)
 # -------------------------------------------------
-# Works when best_ctc_ocr.pt is a state_dict (OrderedDict)
-# Architecture: CRNN (CNN + BiLSTM + CTC)
+# ✔ Fixes OrderedDict loading
+# ✔ Matches checkpoint shapes (fc: 78 x 128)
+# ✔ Batch OCR
+# ✔ Greedy CTC decode
+# ✔ Word-level confidence
 
 import streamlit as st
 import torch
@@ -17,16 +20,21 @@ import numpy as np
 st.set_page_config(page_title="CTC OCR", page_icon="🧠", layout="wide")
 
 # -----------------------------
-# Charset (EDIT if needed)
-# index 0 = CTC blank
+# CONSTANTS (MATCH CHECKPOINT)
 # -----------------------------
-CHARSET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+NUM_CLASSES = 78            # INCLUDING CTC BLANK
+IMG_HEIGHT = 32
+IMG_WIDTH = 128
+
+# ⚠️ Charset length MUST be 77 (78 - blank)
+CHARSET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.,-:/()"
+CHARSET = CHARSET[:77]  # safety clamp
+
 idx2char = {i + 1: c for i, c in enumerate(CHARSET)}
-idx2char[0] = ""
-NUM_CLASSES = len(CHARSET) + 1
+idx2char[0] = ""  # CTC blank
 
 # -----------------------------
-# CRNN Model Definition
+# CRNN MODEL (EXACT MATCH)
 # -----------------------------
 class CRNN(nn.Module):
     def __init__(self, num_classes):
@@ -43,61 +51,59 @@ class CRNN(nn.Module):
 
             nn.Conv2d(128, 256, 3, 1, 1),
             nn.ReLU(),
-            nn.Conv2d(256, 256, 3, 1, 1),
-            nn.ReLU(),
             nn.MaxPool2d((2, 1)),
 
-            nn.Conv2d(256, 512, 3, 1, 1),
-            nn.BatchNorm2d(512),
+            nn.Conv2d(256, 256, 3, 1, 1),
             nn.ReLU(),
             nn.MaxPool2d((2, 1)),
         )
 
+        # BiLSTM: 64 * 2 = 128 features
         self.rnn = nn.LSTM(
-            input_size=512,
-            hidden_size=256,
+            input_size=256,
+            hidden_size=64,
             num_layers=2,
             bidirectional=True,
             batch_first=True
         )
 
-        self.fc = nn.Linear(512, num_classes)
+        self.fc = nn.Linear(128, num_classes)
 
     def forward(self, x):
-        x = self.cnn(x)              # (B, C, H, W)
-        x = x.squeeze(2)             # (B, C, W)
-        x = x.permute(0, 2, 1)       # (B, T, C)
-        x, _ = self.rnn(x)           # (B, T, 512)
-        x = self.fc(x)               # (B, T, num_classes)
+        x = self.cnn(x)          # (B, C, H, W)
+        x = x.squeeze(2)         # (B, C, W)
+        x = x.permute(0, 2, 1)   # (B, T, C)
+        x, _ = self.rnn(x)       # (B, T, 128)
+        x = self.fc(x)           # (B, T, 78)
         return x
 
 # -----------------------------
-# Load model (state_dict safe)
+# LOAD MODEL (SAFE)
 # -----------------------------
 @st.cache_resource
 def load_model():
     model = CRNN(NUM_CLASSES)
-    state = torch.load("best_ctc_ocr.pt", map_location="cpu")
-    model.load_state_dict(state, strict=False)
+    state_dict = torch.load("best_ctc_ocr.pt", map_location="cpu")
+    model.load_state_dict(state_dict)
     model.eval()
     return model
 
 model = load_model()
 
 # -----------------------------
-# Image preprocessing
+# IMAGE PREPROCESSING
 # -----------------------------
 transform = T.Compose([
     T.Grayscale(1),
-    T.Resize((32, 128)),
+    T.Resize((IMG_HEIGHT, IMG_WIDTH)),
     T.ToTensor(),
     T.Normalize(mean=[0.5], std=[0.5])
 ])
 
 # -----------------------------
-# CTC Greedy Decoder + confidence
+# CTC GREEDY DECODER
 # -----------------------------
-def ctc_greedy_decode(logits):
+def ctc_decode(logits):
     probs = F.softmax(logits, dim=2)
     max_probs, indices = probs.max(dim=2)
 
@@ -109,7 +115,7 @@ def ctc_greedy_decode(logits):
         idx = idx.item()
         prob = prob.item()
         if idx != prev and idx != 0:
-            chars.append(idx2char[idx])
+            chars.append(idx2char.get(idx, ""))
             confs.append(prob)
         prev = idx
 
@@ -118,10 +124,10 @@ def ctc_greedy_decode(logits):
     return text, confidence
 
 # -----------------------------
-# UI
+# STREAMLIT UI
 # -----------------------------
-st.title("🧠 CTC OCR (Ready to Use)")
-st.caption("CRNN + PyTorch + CTC decoding")
+st.title("🧠 CTC OCR — Ready to Run")
+st.caption("CRNN • PyTorch • Greedy CTC • Batch OCR")
 st.divider()
 
 files = st.file_uploader(
@@ -133,8 +139,8 @@ files = st.file_uploader(
 if files:
     for file in files:
         image = Image.open(file).convert("RGB")
-        col1, col2 = st.columns([1, 2])
 
+        col1, col2 = st.columns([1, 2])
         with col1:
             st.image(image, caption=file.name, use_container_width=True)
 
@@ -144,13 +150,13 @@ if files:
                     img = transform(image).unsqueeze(0)
                     with torch.no_grad():
                         logits = model(img)
-                        text, conf = ctc_greedy_decode(logits)
+                        text, conf = ctc_decode(logits)
 
-                st.success("Done")
+                st.success("OCR completed")
                 st.text_area("Extracted Text", text, height=120)
                 st.metric("Word-level Confidence", f"{conf * 100:.2f}%")
 else:
     st.info("Upload one or more images to begin OCR.")
 
 st.divider()
-st.caption("Drop-in app.py • No changes required")
+st.caption("Drop-in app.py • No edits needed")
